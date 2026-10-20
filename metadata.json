@@ -1,0 +1,6 @@
+{
+  "name": "SpriteSmithy Pro",
+  "description": "Client-side game asset sprite extractor, de-haloing studio, and batch background removal pipeline using the Browser File System Access API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
