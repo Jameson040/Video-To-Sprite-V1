@@ -3,8 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
-import { AtlasAndDocsView } from './components/AtlasAndDocsView';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BatchQueuePanel } from './components/BatchQueuePanel';
 import { CanvasViewport } from './components/CanvasViewport';
 import {
@@ -20,7 +19,7 @@ import {
   ProcessingSettings,
   WizardStep,
 } from './types/sprite';
-import { DEFAULT_SETTINGS, USER_ARSENAL_VIDEOS } from './utils/demoAssets';
+import { DEFAULT_SETTINGS } from './utils/demoAssets';
 import {
   exportSpriteBundle,
   LocalFileResult,
@@ -31,14 +30,13 @@ import {
 import {
   autoDetectSeamlessLoopTimeWindow,
   buildNormalizedSpriteSheetAndMetadata,
-  computePerfectLoopDetection,
   extractFramesFromImageFile,
   extractFramesFromVideoUrl,
-  processSpriteFrameCanvas,
   readVideoMetadataQuick,
 } from './utils/imageProcessor';
+import { runPipelineOnAssetInWorkers } from './utils/workerPool';
 
-type ActiveNavView = 'single_wizard' | 'batch' | 'atlas' | 'guide';
+type ActiveNavView = 'single_wizard' | 'batch';
 
 export default function App() {
   const [activeView, setActiveView] = useState<ActiveNavView>('single_wizard');
@@ -65,6 +63,12 @@ export default function App() {
     current: number;
     total: number;
   } | null>(null);
+  const [workerProgress, setWorkerProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
+  const workerJobIdRef = useRef<number>(0);
+  const skipNextWorkerEffectRef = useRef<boolean>(false);
 
   // Browser File System Access API state for Batch Mode
   const [mountedDirectoryHandle, setMountedDirectoryHandle] =
@@ -82,104 +86,123 @@ export default function App() {
   }, []);
 
   /**
-   * Runs the deterministic SpriteSmithy Halo Removal, Trapped Pocket Solver, Loose Particle Cleaner & Anti-Shift Centering pipeline.
+   * Fast <8ms Sprite Sheet & Normalized Frame Rebuilder when only loop range, frame toggle, or sheet layout changes
+   * (no need to re-run pixel keying when frames are already processed).
    */
-  const runPipelineOnAsset = useCallback(
+  const rebuildSheetOnly = useCallback(
     (
       asset: BatchAssetItem,
       currentSettings: ProcessingSettings,
-      bypassHalo: boolean
+      startIdx?: number,
+      endIdx?: number
     ): BatchAssetItem => {
       if (asset.frames.length === 0) return asset;
-
-      const t0 = performance.now();
-      const effectiveSettings: ProcessingSettings = bypassHalo
-        ? {
-            ...currentSettings,
-            autoPunchTrappedHoles: false,
-            cleanLooseParticles: false,
-            colorUnmixStrength: 0,
-            deSpillStrength: 0,
-            innerColorBleedRadius: 0,
-            alphaChoke: 0,
-            haloLuminanceClamp: 0,
-            edgeContrast: 0,
-            edgeSharpness: 0,
-          }
-        : currentSettings;
-
-      const updatedFrames: ExtractedFrame[] = asset.frames.map((frame) => {
-        const {
-          processedCanvas,
-          heatmapCanvas,
-          cropBox,
-          coreBodyBox,
-          removedParticleBoxes,
-          metrics,
-        } = processSpriteFrameCanvas(frame.sourceCanvas, effectiveSettings);
-        return {
-          ...frame,
-          processedCanvas,
-          heatmapCanvas,
-          cropBox,
-          coreBodyBox,
-          removedParticleBoxes,
-          processedWidth: cropBox.width,
-          processedHeight: cropBox.height,
-          haloMetrics: metrics,
-        };
-      });
-
-      const loopResult = computePerfectLoopDetection(updatedFrames);
-      const framesWithLoop = updatedFrames.map((f, idx) => ({
-        ...f,
-        loopSimilarityScore: loopResult.similarities[idx],
-      }));
-
       const safeStart = Math.max(
         0,
-        Math.min(asset.loopStartFrame, Math.max(0, framesWithLoop.length - 1))
+        Math.min(
+          startIdx ?? asset.loopStartFrame,
+          Math.max(0, asset.frames.length - 1)
+        )
       );
       const safeEnd = Math.max(
         safeStart,
-        Math.min(asset.loopEndFrame, Math.max(0, framesWithLoop.length - 1))
+        Math.min(
+          endIdx ?? asset.loopEndFrame,
+          Math.max(0, asset.frames.length - 1)
+        )
       );
 
-      const { sheetCanvas, metadataJson } = buildNormalizedSpriteSheetAndMetadata(
+      const {
+        sheetCanvas,
+        normalizedFrames,
+        metadataJson,
+        frameWidth,
+        frameHeight,
+      } = buildNormalizedSpriteSheetAndMetadata(
         asset.name,
-        framesWithLoop,
-        effectiveSettings,
+        asset.frames,
+        currentSettings,
         safeStart,
         safeEnd
       );
 
       return {
         ...asset,
-        status: 'completed',
-        progress: 100,
-        frames: framesWithLoop,
+        loopStartFrame: safeStart,
+        loopEndFrame: safeEnd,
         outputSheetCanvas: sheetCanvas,
+        outputNormalizedFrames: normalizedFrames,
+        outputCellWidth: frameWidth,
+        outputCellHeight: frameHeight,
         outputMetadataJson: metadataJson,
-        bestLoopCandidate: loopResult.bestLoop,
-        processingTimeMs: Math.round(performance.now() - t0),
       };
     },
     []
   );
 
   const activeAsset = assets.find((a) => a.id === activeAssetId) || assets[0] || null;
+  const activeAssetRef = useRef<BatchAssetItem | null>(null);
+  activeAssetRef.current = activeAsset;
+  const activeFrameIndexRef = useRef<number>(0);
+  activeFrameIndexRef.current = activeFrameIndex;
 
-  // Re-process active video whenever settings or bypassHaloTweaks change (only if frames are already extracted)
+  // Non-blocking Web Worker re-processing when settings or bypassHaloTweaks change:
+  // 1. Processes the currently viewed frame FIRST (~25ms) so the canvas updates immediately.
+  // 2. Processes remaining frames in parallel in the background Web Worker Pool.
+  // 3. Immediately cancels stale runs if the user drags a slider again!
   useEffect(() => {
-    if (!activeAsset || activeAsset.frames.length === 0) return;
-    setAssets((prev) =>
-      prev.map((item) =>
-        item.id === activeAsset.id
-          ? runPipelineOnAsset(item, settings, bypassHaloTweaks)
-          : item
-      )
-    );
-  }, [settings, bypassHaloTweaks, activeAssetId, runPipelineOnAsset]);
+    if (skipNextWorkerEffectRef.current) {
+      skipNextWorkerEffectRef.current = false;
+      return;
+    }
+    const currentAsset = activeAssetRef.current;
+    if (!currentAsset || currentAsset.frames.length === 0) return;
+
+    const jobToken = ++workerJobIdRef.current;
+    const targetAssetId = currentAsset.id;
+    const priorityIdx = activeFrameIndexRef.current;
+
+    setWorkerProgress({ completed: 0, total: currentAsset.frames.length });
+
+    runPipelineOnAssetInWorkers(
+      currentAsset,
+      settings,
+      bypassHaloTweaks,
+      false,
+      {
+        priorityFrameIndex: priorityIdx,
+        isCancelled: () => jobToken !== workerJobIdRef.current,
+        onPriorityFrameReady: (updatedFrame, frameIdx) => {
+          if (jobToken !== workerJobIdRef.current) return;
+          // Immediately paint the active frame so slider feedback is instant (<30ms)
+          setAssets((prev) =>
+            prev.map((item) => {
+              if (item.id !== targetAssetId) return item;
+              const nextFrames = [...item.frames];
+              nextFrames[frameIdx] = updatedFrame;
+              return { ...item, frames: nextFrames };
+            })
+          );
+        },
+        onProgress: (completed, total) => {
+          if (jobToken !== workerJobIdRef.current) return;
+          setWorkerProgress({ completed, total });
+        },
+      }
+    )
+      .then((finishedItem) => {
+        if (jobToken !== workerJobIdRef.current || !finishedItem) return;
+        setAssets((prev) =>
+          prev.map((item) => (item.id === targetAssetId ? finishedItem : item))
+        );
+        setWorkerProgress(null);
+      })
+      .catch(() => {
+        if (jobToken === workerJobIdRef.current) {
+          setWorkerProgress(null);
+        }
+      });
+  }, [settings, bypassHaloTweaks, activeAssetId]);
 
   const updateSettings = useCallback((partial: Partial<ProcessingSettings>) => {
     setSettings((prev) => ({ ...prev, ...partial }));
@@ -192,11 +215,18 @@ export default function App() {
     sampledHex?: string
   ) => {
     const newSeed = {
-      id: `seed-${Date.now()}`,
+      id: `seed-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       relX,
       relY,
       mode,
-      sampledHex,
+      enabled: true,
+      sampledHex: sampledHex || settings.keyColor,
+      extraColors: [],
+      useGlobalPocketPalette: true,
+      localTolerance: settings.localPunchTolerance ?? 24,
+      maxRadiusPct: settings.localPunchRadius ?? 30,
+      frameScope: 'all_frames' as const,
+      targetFrameIndex: activeFrameIndex,
     };
     setSettings((prev) => ({
       ...prev,
@@ -204,11 +234,14 @@ export default function App() {
         mode !== 'erase_particle' ? true : prev.protectInteriorColors,
       holeSeeds: [...prev.holeSeeds, newSeed],
     }));
+    const layerCount =
+      settings.holeSeeds.filter((s) => s.mode === 'punch_hole' || s.mode === 'protect_spot')
+        .length + 1;
     showToast(
       mode === 'punch_hole'
-        ? `Punched localised pocket (${sampledHex || 'auto'}) across all frames!`
+        ? `Added Pocket Layer #${layerCount} (${sampledHex || settings.keyColor}) — Edit colors & options in Pocket Layers!`
         : mode === 'protect_spot'
-        ? 'Protected local character area across all frames!'
+        ? `Added Protect Layer #${layerCount} (${sampledHex || 'solid'}) across frames!`
         : 'Zapped loose floating speck across frames!'
     );
   };
@@ -241,10 +274,10 @@ export default function App() {
   };
 
   /**
-   * Stage 3: Genuine On-Demand Frame Extraction with live progress feedback.
+   * On-Demand Frame Extraction for Step-by-Step mode with live progress feedback.
    */
   const handleExtractFramesNow = useCallback(
-    async (advanceToStage4After: boolean = false) => {
+    async (advanceToStage3After: boolean = false) => {
       if (!activeAsset?.sourceUrl) return;
       setIsExtractingFrames(true);
       setExtractionProgress({ current: 0, total: 1 });
@@ -253,6 +286,7 @@ export default function App() {
         const {
           frames,
           detectedKeyColor,
+          bgProfile,
           videoDurationSec,
           actualStartSec,
           actualEndSec,
@@ -280,54 +314,77 @@ export default function App() {
           keyColor: keyHex,
           chromaWeight: sat < 30 ? 35 : 80,
         };
+        skipNextWorkerEffectRef.current = true;
         setSettings(nextSettings);
         setActiveFrameIndex(0);
 
-        setAssets((prev) =>
-          prev.map((item) => {
-            if (item.id !== activeAsset.id) return item;
-            const updatedItem: BatchAssetItem = {
-              ...item,
-              videoDurationSec,
-              extractStartSec: actualStartSec,
-              extractEndSec: actualEndSec,
-              extractedAtFps: winFps,
-              frames,
-              detectedKeyColor: keyHex,
-              loopStartFrame: 0,
-              loopEndFrame: Math.max(0, frames.length - 1),
-            };
-            return runPipelineOnAsset(updatedItem, nextSettings, bypassHaloTweaks);
-          })
+        const jobToken = ++workerJobIdRef.current;
+        const baseItem: BatchAssetItem = {
+          ...activeAsset,
+          videoDurationSec,
+          extractStartSec: actualStartSec,
+          extractEndSec: actualEndSec,
+          extractedAtFps: winFps,
+          frames,
+          detectedKeyColor: keyHex,
+          bgProfile,
+          loopStartFrame: 0,
+          loopEndFrame: Math.max(0, frames.length - 1),
+        };
+
+        setWorkerProgress({ completed: 0, total: frames.length });
+        const finishedItem = await runPipelineOnAssetInWorkers(
+          baseItem,
+          nextSettings,
+          bypassHaloTweaks,
+          Boolean(nextSettings.autoTrimToLoop),
+          {
+            priorityFrameIndex: 0,
+            isCancelled: () => jobToken !== workerJobIdRef.current,
+            onProgress: (completed, total) => {
+              setExtractionProgress({ current: completed, total });
+              setWorkerProgress({ completed, total });
+            },
+          }
         );
 
+        if (finishedItem) {
+          setAssets((prev) =>
+            prev.map((item) => (item.id === finishedItem.id ? finishedItem : item))
+          );
+        }
+
         showToast(
-          `Extracted ${frames.length} frames (${actualStartSec.toFixed(
+          `Extracted & processed ${frames.length} frames in Background Workers (${actualStartSec.toFixed(
             2
-          )}s – ${actualEndSec.toFixed(2)}s @ ${winFps} FPS)`
+          )}s–${actualEndSec.toFixed(2)}s @ ${winFps} FPS)!`
         );
-        if (advanceToStage4After) {
-          setCurrentStep(4);
+        if (advanceToStage3After) {
+          setCurrentStep(3);
         }
       } catch (err: any) {
         showToast(err?.message || 'Failed to extract frames');
       } finally {
         setIsExtractingFrames(false);
         setExtractionProgress(null);
+        setWorkerProgress(null);
       }
     },
-    [activeAsset, winFps, winStartSec, winEndSec, settings, bypassHaloTweaks, runPipelineOnAsset, showToast]
+    [activeAsset, winFps, winStartSec, winEndSec, settings, bypassHaloTweaks, showToast]
   );
 
-  // If user jumps directly to Stage 4+ before extracting frames in Stage 3, automatically trigger extraction so they aren't stuck
+  // If user jumps directly to Stage 3+ before extracting frames, automatically trigger extraction so they aren't stuck
   const handleStepChange = (targetStep: WizardStep) => {
     if (targetStep > 1 && !activeAsset) {
       showToast('Please upload a video or pick an Arsenal test video first!');
       return;
     }
     setCurrentStep(targetStep);
+    if (targetStep === 6) {
+      setIsPlaying(true);
+    }
     if (
-      targetStep >= 4 &&
+      targetStep >= 3 &&
       activeAsset &&
       activeAsset.frames.length === 0 &&
       !isExtractingFrames
@@ -337,19 +394,128 @@ export default function App() {
   };
 
   /**
-   * Instant (<50ms) load when selecting an Arsenal Video in Stage 1 — advances immediately to Stage 2 (Loop Selection)!
+   * V2 Autonomous Zero-Touch Runner (Background Web Worker Pool):
+   * Automatically extracts native frames, runs 3-Cluster K-Means BG profiling, Sobel Trapped Space Punch,
+   * 3px Boundary Linear Color Unmixing, and Silhouette-IoU + Velocity Auto-Loop + Foot Locking off the main thread!
+   */
+  const runZeroTouchV2ForVideo = useCallback(
+    async (
+      item: BatchAssetItem,
+      targetSettings: ProcessingSettings,
+      startSec: number,
+      endSec: number,
+      fps: number
+    ) => {
+      if (!item.sourceUrl) return;
+      setIsExtractingFrames(true);
+      setExtractionProgress({ current: 0, total: 1 });
+      setCurrentStep(3);
+
+      try {
+        const {
+          frames,
+          detectedKeyColor,
+          bgProfile,
+          videoDurationSec,
+          actualStartSec,
+          actualEndSec,
+        } = await extractFramesFromVideoUrl(
+          item.sourceUrl,
+          item.id,
+          fps,
+          startSec,
+          endSec,
+          120,
+          (current, total) => setExtractionProgress({ current, total })
+        );
+
+        const keyHex = detectedKeyColor || item.detectedKeyColor || '#FBFBFB';
+        const calibratedSettings: ProcessingSettings = {
+          ...targetSettings,
+          autonomousV2Mode: true,
+          keyingMode: 'v2_auto_kmeans',
+          keyColor: keyHex,
+          videoFps: fps,
+        };
+        skipNextWorkerEffectRef.current = true;
+        setSettings(calibratedSettings);
+
+        const populatedItem: BatchAssetItem = {
+          ...item,
+          videoDurationSec,
+          extractStartSec: actualStartSec,
+          extractEndSec: actualEndSec,
+          extractedAtFps: fps,
+          frames,
+          detectedKeyColor: keyHex,
+          bgProfile,
+          loopStartFrame: 0,
+          loopEndFrame: Math.max(0, frames.length - 1),
+        };
+
+        const jobToken = ++workerJobIdRef.current;
+        setWorkerProgress({ completed: 0, total: frames.length });
+
+        const finishedItem = await runPipelineOnAssetInWorkers(
+          populatedItem,
+          calibratedSettings,
+          false,
+          Boolean(calibratedSettings.autoTrimToLoop),
+          {
+            priorityFrameIndex: 0,
+            isCancelled: () => jobToken !== workerJobIdRef.current,
+            onProgress: (completed, total) => {
+              setExtractionProgress({ current: completed, total });
+              setWorkerProgress({ completed, total });
+            },
+          }
+        );
+
+        if (finishedItem) {
+          setAssets((prev) =>
+            prev.map((a) => (a.id === finishedItem.id ? finishedItem : a))
+          );
+          setActiveFrameIndex(finishedItem.loopStartFrame);
+          setIsPlaying(true);
+          setCurrentStep(6);
+
+          const activeCount =
+            finishedItem.loopEndFrame - finishedItem.loopStartFrame + 1;
+          showToast(
+            `V2 Worker Pipeline Complete: ${activeCount} frames (${actualStartSec.toFixed(
+              2
+            )}s–${actualEndSec.toFixed(2)}s @ ${fps} FPS) — Playing Live Sprite Preview!`
+          );
+        }
+      } catch (err: any) {
+        showToast(err?.message || 'V2 Autonomous Pipeline failed');
+      } finally {
+        setIsExtractingFrames(false);
+        setExtractionProgress(null);
+        setWorkerProgress(null);
+      }
+    },
+    [showToast]
+  );
+
+  /**
+   * Load Arsenal Video — in V2 Autonomous Mode, automatically runs all 4 stages to a finished sprite sheet!
    */
   const handleSelectArsenalVideo = async (preset: ArsenalVideoPreset) => {
     try {
       const meta = await readVideoMetadataQuick(preset.url);
       const startSec = preset.defaultStartSec ?? 0;
-      const endSec = preset.defaultEndSec ?? Math.min(meta.videoDurationSec, 1.5);
+      const endSec = preset.defaultEndSec ?? Math.min(meta.videoDurationSec, 1.6);
       const fps = preset.defaultFps || 24;
 
       const nextSettings: ProcessingSettings = {
         ...DEFAULT_SETTINGS,
         ...preset.recommendedSettings,
-        keyColor: preset.recommendedSettings.keyColor || meta.detectedKeyColor,
+        autonomousV2Mode: settings.autonomousV2Mode,
+        keyingMode: settings.autonomousV2Mode
+          ? 'v2_auto_kmeans'
+          : preset.recommendedSettings.keyingMode || 'chroma_perceptual',
+        keyColor: meta.detectedKeyColor || preset.recommendedSettings.keyColor || '#FBFBFB',
         holeSeeds: [],
       };
       setSettings(nextSettings);
@@ -370,8 +536,9 @@ export default function App() {
         extractStartSec: startSec,
         extractEndSec: endSec,
         extractedAtFps: fps,
-        frames: [], // Extracted on demand in Stage 3!
+        frames: [],
         detectedKeyColor: nextSettings.keyColor,
+        bgProfile: meta.bgProfile,
         loopStartFrame: 0,
         loopEndFrame: 0,
       };
@@ -383,7 +550,9 @@ export default function App() {
       setActiveAssetId(newItem.id);
       setActiveFrameIndex(0);
       setCurrentStep(2);
-      showToast(`Loaded ${preset.title} (${meta.videoDurationSec}s) — Choose Loop in Step 2!`);
+      showToast(
+        `Loaded ${preset.title} (${meta.videoDurationSec}s) — Review Initial Parameters & click Generate Sprite Sheet!`
+      );
     } catch (err: any) {
       showToast(err?.message || 'Failed to load video');
     }
@@ -419,7 +588,7 @@ export default function App() {
         const nextFrames = item.frames.map((f, idx) =>
           idx === frameIndex ? { ...f, enabled: !f.enabled } : f
         );
-        return runPipelineOnAsset({ ...item, frames: nextFrames }, settings, bypassHaloTweaks);
+        return rebuildSheetOnly({ ...item, frames: nextFrames }, settings);
       })
     );
   };
@@ -429,11 +598,7 @@ export default function App() {
     setAssets((prev) =>
       prev.map((item) => {
         if (item.id !== activeAsset.id) return item;
-        return runPipelineOnAsset(
-          { ...item, loopStartFrame: start, loopEndFrame: end },
-          settings,
-          bypassHaloTweaks
-        );
+        return rebuildSheetOnly(item, settings, start, end);
       })
     );
   };
@@ -463,7 +628,9 @@ export default function App() {
         if (isVideo) {
           const objectUrl = URL.createObjectURL(file);
           const meta = await readVideoMetadataQuick(objectUrl);
-          const defaultEnd = Number(Math.min(meta.videoDurationSec, 2.0).toFixed(2));
+          // Default to the FULL video duration so action animations (e.g. 0s-4s Minotaur punch) are never truncated!
+          const defaultEnd = Number(meta.videoDurationSec.toFixed(2));
+          const defaultFps = settings.videoFps || 12;
 
           const item: BatchAssetItem = {
             id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -478,15 +645,17 @@ export default function App() {
             videoDurationSec: meta.videoDurationSec,
             extractStartSec: 0,
             extractEndSec: defaultEnd,
-            extractedAtFps: 24,
-            frames: [], // Extracted on demand in Stage 3!
+            extractedAtFps: defaultFps,
+            frames: [],
             detectedKeyColor: meta.detectedKeyColor,
+            bgProfile: meta.bgProfile,
             loopStartFrame: 0,
             loopEndFrame: 0,
           };
           importedItems.push(item);
         } else {
-          const { frames, detectedKeyColor } = await extractFramesFromImageFile(file);
+          const { frames, detectedKeyColor, bgProfile } =
+            await extractFramesFromImageFile(file);
           const item: BatchAssetItem = {
             id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             name: file.name,
@@ -501,16 +670,17 @@ export default function App() {
             extractedAtFps: 24,
             frames,
             detectedKeyColor,
+            bgProfile,
             loopStartFrame: 0,
             loopEndFrame: Math.max(0, frames.length - 1),
           };
-          importedItems.push(
-            runPipelineOnAsset(
-              item,
-              { ...settings, keyColor: detectedKeyColor, holeSeeds: [] },
-              bypassHaloTweaks
-            )
+          const processedItem = await runPipelineOnAssetInWorkers(
+            item,
+            { ...settings, keyColor: detectedKeyColor, holeSeeds: [] },
+            bypassHaloTweaks,
+            true
           );
+          if (processedItem) importedItems.push(processedItem);
         }
       } catch (err: any) {
         showToast(err?.message || `Failed to load ${file.name}`);
@@ -527,29 +697,25 @@ export default function App() {
       setWinFps(first.extractedAtFps);
       setDetectedVideoLoopScore(null);
 
-      if (first.detectedKeyColor) {
-        const [r, g, b] = [
-          parseInt(first.detectedKeyColor.slice(1, 3), 16) || 0,
-          parseInt(first.detectedKeyColor.slice(3, 5), 16) || 0,
-          parseInt(first.detectedKeyColor.slice(5, 7), 16) || 0,
-        ];
-        const sat = Math.max(r, g, b) - Math.min(r, g, b);
-        setSettings((prev) => ({
-          ...prev,
-          keyColor: first.detectedKeyColor!,
-          chromaWeight: sat < 30 ? 35 : 80,
-          holeSeeds: [],
-        }));
-      }
+      const nextSettings: ProcessingSettings = {
+        ...settings,
+        keyColor: first.detectedKeyColor || settings.keyColor,
+        holeSeeds: [],
+      };
+      skipNextWorkerEffectRef.current = true;
+      setSettings(nextSettings);
 
       if (first.type === 'video') {
+        // Always open Step 2 (Initial Parameter Control) first so the user can verify/adjust
+        // Time Window, FPS, Remove Ground Shadow, and Target Resolution before generating!
         setCurrentStep(2);
         showToast(
-          `Loaded ${first.name} (${first.videoDurationSec}s) — Pick Loop or Auto-Detect in Step 2!`
+          `Loaded ${first.name} (${first.videoDurationSec}s) — Set Initial Parameters & click Generate Sprite Sheet!`
         );
       } else {
-        setCurrentStep(4);
-        showToast(`Loaded image ${first.name}`);
+        setIsPlaying(true);
+        setCurrentStep(6);
+        showToast(`Processed ${first.name} — Playing Live Sprite Preview!`);
       }
     }
   };
@@ -603,20 +769,19 @@ export default function App() {
           parseInt(itemKey.slice(5, 7), 16) || 0,
         ];
         const sat = Math.max(r, g, b) - Math.min(r, g, b);
-        updatedList.push(
-          runPipelineOnAsset(
-            workingItem,
-            {
-              ...settings,
-              keyColor: itemKey,
-              chromaWeight: sat < 30 ? 35 : settings.chromaWeight,
-            },
-            bypassHaloTweaks
-          )
+        const processed = await runPipelineOnAssetInWorkers(
+          workingItem,
+          {
+            ...settings,
+            keyColor: itemKey,
+            chromaWeight: sat < 30 ? 35 : settings.chromaWeight,
+          },
+          bypassHaloTweaks
         );
+        if (processed) updatedList.push(processed);
       }
       setAssets(updatedList);
-      showToast(`Processed all ${updatedList.length} assets with your recipe!`);
+      showToast(`Processed all ${updatedList.length} assets in Background Workers!`);
     } finally {
       setIsBatchRunning(false);
     }
@@ -718,7 +883,7 @@ export default function App() {
           SpriteSmithy Pro
         </a>
 
-        {/* Zone 2: 4 concise single-line text navigation links */}
+        {/* Zone 2: Concise single-line text navigation links */}
         <nav className="hidden md:flex items-center gap-6 text-xs font-medium text-slate-300">
           <a
             href="#single"
@@ -730,7 +895,7 @@ export default function App() {
               activeView === 'single_wizard' ? 'text-sky-400 underline font-semibold' : ''
             }`}
           >
-            Staged Studio
+            6-Stage Studio
           </a>
           <a
             href="#batch"
@@ -744,30 +909,24 @@ export default function App() {
           >
             Batch Mode ({assets.length})
           </a>
-          <a
-            href="#atlas"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('atlas');
-            }}
-            className={`hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-              activeView === 'atlas' ? 'text-sky-400 underline font-semibold' : ''
-            }`}
-          >
-            Sheet & JSON
-          </a>
-          <a
-            href="#guide"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('guide');
-            }}
-            className={`hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-              activeView === 'guide' ? 'text-sky-400 underline font-semibold' : ''
-            }`}
-          >
-            Architecture Guide
-          </a>
+          {activeAsset && activeAsset.frames.length > 0 && (
+            <a
+              href="#live-preview"
+              onClick={(e) => {
+                e.preventDefault();
+                setActiveView('single_wizard');
+                setIsPlaying(true);
+                setCurrentStep(6);
+              }}
+              className={`hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
+                activeView === 'single_wizard' && currentStep === 6
+                  ? 'text-emerald-400 underline font-semibold'
+                  : 'text-emerald-300/90'
+              }`}
+            >
+              ▶ Live Sprite Player & Export
+            </a>
+          )}
         </nav>
 
         {/* Zone 3: 1 primary action */}
@@ -811,11 +970,26 @@ export default function App() {
               activeAsset={activeAsset}
               onSelectAssetById={handleSelectAssetById}
               winStartSec={winStartSec}
+              setWinStartSec={setWinStartSec}
               winEndSec={winEndSec}
+              setWinEndSec={setWinEndSec}
               winFps={winFps}
+              setWinFps={setWinFps}
               isExtractingFrames={isExtractingFrames}
               extractionProgress={extractionProgress}
+              workerProgress={workerProgress}
               onExtractFramesNow={() => handleExtractFramesNow(true)}
+              onRunV2ZeroTouchNow={() => {
+                if (activeAsset) {
+                  runZeroTouchV2ForVideo(
+                    activeAsset,
+                    settings,
+                    winStartSec,
+                    winEndSec,
+                    winFps
+                  );
+                }
+              }}
               activeFrameIndex={activeFrameIndex}
               setActiveFrameIndex={setActiveFrameIndex}
               isPlaying={isPlaying}
@@ -835,6 +1009,7 @@ export default function App() {
               currentStep={currentStep}
               setCurrentStep={handleStepChange}
               activeAsset={activeAsset}
+              activeFrameIndex={activeFrameIndex}
               winStartSec={winStartSec}
               setWinStartSec={setWinStartSec}
               winEndSec={winEndSec}
@@ -851,7 +1026,18 @@ export default function App() {
               isScanningLoop={isScanningLoop}
               loopScanProgress={loopScanProgress}
               detectedVideoLoopScore={detectedVideoLoopScore}
-              onExtractFramesNow={() => handleExtractFramesNow(false)}
+              onExtractFramesNow={() => handleExtractFramesNow(true)}
+              onRunV2ZeroTouchNow={() => {
+                if (activeAsset) {
+                  runZeroTouchV2ForVideo(
+                    activeAsset,
+                    settings,
+                    winStartSec,
+                    winEndSec,
+                    winFps
+                  );
+                }
+              }}
               isExtractingFrames={isExtractingFrames}
               extractionProgress={extractionProgress}
               onPickLocalFiles={handlePickLocalFiles}
@@ -899,20 +1085,6 @@ export default function App() {
             usingNativeFS={usingNativeFS}
             settings={settings}
             compactSidebar={false}
-          />
-        </main>
-      )}
-
-      {/* ATLAS & GUIDE VIEWS */}
-      {(activeView === 'atlas' || activeView === 'guide') && activeAsset && (
-        <main className="flex-1 overflow-y-auto">
-          <AtlasAndDocsView
-            activeAsset={activeAsset}
-            settings={settings}
-            updateSettings={updateSettings}
-            onExportCurrentSheetPng={handleExportCurrentSheetPng}
-            onExportCurrentBundleZip={handleExportCurrentBundleZip}
-            mode={activeView}
           />
         </main>
       )}

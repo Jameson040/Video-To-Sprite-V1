@@ -7,6 +7,8 @@ import {
   Crosshair,
   Download,
   Eraser,
+  Eye,
+  EyeOff,
   FolderPlus,
   Layers,
   Loader2,
@@ -34,11 +36,12 @@ import {
   ParticleFilterMode,
   ProcessingSettings,
   SheetLayoutMode,
+  TargetSpriteResolution,
   WizardStep,
 } from '../types/sprite';
 import { STUDIO_PRESETS, USER_ARSENAL_VIDEOS } from '../utils/demoAssets';
 
-export const SEVEN_STAGES: {
+export const SIX_STAGES: {
   step: WizardStep;
   label: string;
   headline: string;
@@ -50,33 +53,28 @@ export const SEVEN_STAGES: {
   },
   {
     step: 2,
-    label: 'Loop Selection',
-    headline: 'Select Action Window & Auto-Detect Loop',
+    label: 'Initial Setup & Loop',
+    headline: 'Initial Parameters, Action Window & Extraction',
   },
   {
     step: 3,
-    label: 'Frame Extraction',
-    headline: 'Extract Frames from Selected Loop',
-  },
-  {
-    step: 4,
     label: 'Background Removal',
     headline: 'Multi-Shade Background & Local Pocket Removal',
   },
   {
-    step: 5,
+    step: 4,
     label: 'Auto-Crop & Sizing',
-    headline: 'Loose Particle Cleaner & Center Lock',
+    headline: 'Loose Particle Cleaner & Foot-Locked Centering',
+  },
+  {
+    step: 5,
+    label: 'Halo Remover',
+    headline: '3px Boundary Unmixing & Edge Preservation',
   },
   {
     step: 6,
-    label: 'Halo Remover',
-    headline: 'Halo Remover & Edge Preservation',
-  },
-  {
-    step: 7,
-    label: 'Export',
-    headline: 'Export Sprite Sheet & Batch Mode',
+    label: 'Preview & Export',
+    headline: 'Live Animated Sprite Player & Sprite Sheet Export',
   },
 ];
 
@@ -102,21 +100,26 @@ export const LeftStepRail: React.FC<LeftStepRailProps> = ({
       <div>
         {/* Brand Header */}
         <div className="px-5 pt-5 pb-4 border-b border-slate-800/60">
-          <div className="text-base font-extrabold tracking-tight text-white">
-            Sprite Smithy
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="text-base font-extrabold tracking-tight text-white">
+              Sprite Smithy
+            </div>
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-mono font-bold text-emerald-300">
+              V2 AUTO
+            </span>
           </div>
           <p className="text-[11px] text-slate-400 mt-0.5">
-            AI Video to Sprite Sheet Converter
+            Video to Sprite Sheet Studio
           </p>
         </div>
 
-        {/* 7 Vertical Stepped Tabs */}
+        {/* 6 Vertical Stepped Tabs */}
         <nav className="p-3 space-y-1">
-          {SEVEN_STAGES.map((item) => {
+          {SIX_STAGES.map((item) => {
             const isActive = currentStep === item.step;
             const isDone =
               (item.step === 1 && hasActiveVideo) ||
-              (item.step === 2 && hasActiveVideo && currentStep > 2) ||
+              (item.step === 2 && hasExtractedFrames) ||
               (item.step >= 3 && hasExtractedFrames && currentStep > item.step);
 
             return (
@@ -184,15 +187,15 @@ export const LeftStepRail: React.FC<LeftStepRailProps> = ({
           </button>
 
           <span className="text-xs font-mono text-slate-400">
-            Step {currentStep} of 7
+            Step {currentStep} of 6
           </span>
 
           <button
             type="button"
-            disabled={currentStep === 7}
-            onClick={() => setCurrentStep(Math.min(7, currentStep + 1) as WizardStep)}
+            disabled={currentStep === 6}
+            onClick={() => setCurrentStep(Math.min(6, currentStep + 1) as WizardStep)}
             className={`p-1.5 rounded-md border text-xs transition-colors ${
-              currentStep === 7
+              currentStep === 6
                 ? 'border-slate-900 text-slate-700 cursor-not-allowed'
                 : 'border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white'
             }`}
@@ -381,6 +384,7 @@ interface StageControlDeckProps {
   currentStep: WizardStep;
   setCurrentStep: (step: WizardStep) => void;
   activeAsset: BatchAssetItem | null;
+  activeFrameIndex?: number;
   winStartSec: number;
   setWinStartSec: (v: number) => void;
   winEndSec: number;
@@ -398,6 +402,7 @@ interface StageControlDeckProps {
   loopScanProgress: number;
   detectedVideoLoopScore: number | null;
   onExtractFramesNow: () => void;
+  onRunV2ZeroTouchNow: () => void;
   isExtractingFrames: boolean;
   extractionProgress: { current: number; total: number } | null;
   onPickLocalFiles: () => void;
@@ -412,6 +417,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
   currentStep,
   setCurrentStep,
   activeAsset,
+  activeFrameIndex = 0,
   winStartSec,
   setWinStartSec,
   winEndSec,
@@ -428,6 +434,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
   loopScanProgress,
   detectedVideoLoopScore,
   onExtractFramesNow,
+  onRunV2ZeroTouchNow,
   isExtractingFrames,
   extractionProgress,
   onApplyBestLoop,
@@ -436,7 +443,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
   onOpenBatchModeWithRecipe,
 }) => {
   const [openPopover, setOpenPopover] = useState<
-    'subclips' | 'pocket_more' | 'particle_more' | 'halo_more' | null
+    'subclips' | 'pocket_studio' | 'pocket_more' | 'particle_more' | 'halo_more' | null
   >(null);
 
   useEffect(() => {
@@ -461,6 +468,60 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
     });
   };
 
+  const addPocketTargetColorSwatch = (defaultHex?: string) => {
+    const existing = settings.pocketTargetColors || [];
+    const fallbackShades = ['#D8DCE3', '#B4BAC6', '#8E96A4', '#E6E2D8'];
+    const hex = defaultHex || fallbackShades[existing.length % fallbackShades.length];
+    updateSettings({
+      pocketTargetColors: [
+        ...existing,
+        {
+          id: `pcol-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          hex,
+          tolerance: settings.localPunchTolerance ?? 24,
+        },
+      ],
+    });
+  };
+
+  const updatePocketTargetColor = (
+    id: string,
+    patch: { hex?: string; tolerance?: number }
+  ) => {
+    updateSettings({
+      pocketTargetColors: (settings.pocketTargetColors || []).map((c) =>
+        c.id === id ? { ...c, ...patch } : c
+      ),
+    });
+  };
+
+  const removePocketTargetColor = (id: string) => {
+    updateSettings({
+      pocketTargetColors: (settings.pocketTargetColors || []).filter((c) => c.id !== id),
+    });
+  };
+
+  const pocketLayers = (settings.holeSeeds || []).filter(
+    (s) => s.mode === 'punch_hole' || s.mode === 'protect_spot'
+  );
+
+  const updatePocketLayer = (
+    layerId: string,
+    patch: Partial<(typeof settings.holeSeeds)[number]>
+  ) => {
+    updateSettings({
+      holeSeeds: (settings.holeSeeds || []).map((s) =>
+        s.id === layerId ? { ...s, ...patch } : s
+      ),
+    });
+  };
+
+  const removePocketLayer = (layerId: string) => {
+    updateSettings({
+      holeSeeds: (settings.holeSeeds || []).filter((s) => s.id !== layerId),
+    });
+  };
+
   return (
     <section className="relative shrink-0 bg-[#0D131F] border-t border-slate-800/90 px-5 py-3 select-none">
       {/* STEP 1: VIDEO LOADED CONFIRMATION BAR */}
@@ -481,13 +542,13 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
             onClick={() => setCurrentStep(2)}
             className="px-4 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors"
           >
-            <span>Continue to Loop Selection</span>
+            <span>Configure Initial Parameters</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
 
-      {/* STEP 2: LOOP SELECTION & AUTO LOOP DETECTOR */}
+      {/* STEP 2: INITIAL SETUP, LOOP SELECTION & EXTRACTION */}
       {currentStep === 2 && (
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-2">
@@ -495,17 +556,17 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
               type="button"
               disabled={isScanningLoop}
               onClick={onAutoDetectVideoLoop}
-              className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm whitespace-nowrap"
+              className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap"
             >
               {isScanningLoop ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Scanning Poses ({loopScanProgress}%)...</span>
+                  <span>Scanning ({loopScanProgress}%)...</span>
                 </>
               ) : (
                 <>
                   <Wand2 className="w-3.5 h-3.5" />
-                  <span>Auto-Detect Seamless Loop</span>
+                  <span>Auto-Detect Loop Window</span>
                 </>
               )}
             </button>
@@ -530,7 +591,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
                 </button>
 
                 {openPopover === 'subclips' && (
-                  <div className="absolute bottom-full left-0 mb-2 w-64 p-2 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-30 space-y-1">
+                  <div className="absolute bottom-full left-0 mb-2 w-72 p-2 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-30 space-y-1">
                     {activeArsenalPreset.subClips.map((clip, i) => (
                       <button
                         key={i}
@@ -539,6 +600,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
                           setWinStartSec(clip.startSec);
                           setWinEndSec(clip.endSec);
                           setWinFps(clip.fps);
+                          updateSettings({ videoFps: clip.fps });
                           setOpenPopover(null);
                         }}
                         className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-slate-200 hover:bg-[#3B82F6] hover:text-white transition-colors"
@@ -550,11 +612,29 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
                 )}
               </div>
             )}
+
+            {frames.length > 2 && activeAsset?.bestLoopCandidate && (
+              <button
+                type="button"
+                onClick={onApplyBestLoop}
+                className="px-2.5 py-2 rounded-lg bg-[#070A10] hover:bg-slate-800 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5"
+                title="Trim extracted frames using Silhouette-IoU + Motion-Direction Velocity match"
+              >
+                <Repeat className="w-3.5 h-3.5" />
+                <span>
+                  Snap Loop (#{activeAsset.bestLoopCandidate.startIdx + 1}→#
+                  {activeAsset.bestLoopCandidate.endIdx + 1} · IoU{' '}
+                  {activeAsset.bestLoopCandidate.silhouetteIoU ??
+                    activeAsset.bestLoopCandidate.similarity}
+                  %)
+                </span>
+              </button>
+            )}
           </div>
 
-          <div className="flex-1 min-w-[260px] max-w-xl grid grid-cols-2 gap-4">
+          <div className="flex-1 min-w-[240px] max-w-lg grid grid-cols-2 gap-4">
             <CompactSlider
-              label="Loop Start Time"
+              label="Start Time"
               value={winStartSec}
               unit="s"
               min={0}
@@ -567,7 +647,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
             />
 
             <CompactSlider
-              label="Loop End Time"
+              label="End Time"
               value={winEndSec}
               unit="s"
               min={0.1}
@@ -580,68 +660,16 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
             />
           </div>
 
-          <button
-            type="button"
-            onClick={() => setCurrentStep(3)}
-            className="px-4 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap"
-          >
-            <span>Next: Frame Extraction</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
-
-      {/* STEP 3: GENUINE ON-DEMAND FRAME EXTRACTION */}
-      {currentStep === 3 && (
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-4 flex-1 min-w-[260px] max-w-xl">
-            <div className="flex-1">
-              <CompactSlider
-                label="Capture Frame Rate (FPS)"
-                value={winFps}
-                unit=" FPS"
-                min={6}
-                max={60}
-                step={2}
-                onChange={(val) => setWinFps(val)}
-              />
-            </div>
-
-            <div className="px-3 py-1.5 rounded-lg bg-[#070A10] border border-slate-800 text-xs font-mono tabular-nums text-slate-300 shrink-0">
-              <span>{estimatedFrames} frames</span>
-              <span className="text-slate-600 mx-1.5">·</span>
-              <span className="text-sky-400">
-                {winStartSec.toFixed(2)}s–{winEndSec.toFixed(2)}s
-              </span>
-            </div>
-          </div>
-
-          {frames.length > 2 && activeAsset?.bestLoopCandidate && (
-            <button
-              type="button"
-              onClick={onApplyBestLoop}
-              className="px-3 py-2 rounded-lg bg-[#070A10] hover:bg-slate-800 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5"
-              title="Trim extracted frames to the closest start/end pose match"
-            >
-              <Repeat className="w-3.5 h-3.5" />
-              <span>
-                Snap Best Frame Loop (#{activeAsset.bestLoopCandidate.startIdx + 1}→#
-                {activeAsset.bestLoopCandidate.endIdx + 1} ·{' '}
-                {activeAsset.bestLoopCandidate.similarity}%)
-              </span>
-            </button>
-          )}
-
-          <div className="flex items-center gap-2.5 ml-auto">
+          <div className="flex items-center gap-2">
             <button
               type="button"
               disabled={isExtractingFrames}
               onClick={onExtractFramesNow}
-              className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap"
             >
               {isExtractingFrames ? (
                 <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />
                   <span>
                     Extracting{' '}
                     {extractionProgress
@@ -651,35 +679,53 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
                 </>
               ) : (
                 <>
-                  <Scissors className="w-3.5 h-3.5" />
-                  <span>
-                    {frames.length === 0
-                      ? `Extract ${estimatedFrames} Frames Now`
-                      : `Re-Extract ${estimatedFrames} Frames (@ ${winFps} FPS)`}
-                  </span>
+                  <Scissors className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Step-by-Step ({estimatedFrames}f)</span>
                 </>
               )}
             </button>
 
-            {frames.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setCurrentStep(4)}
-                className="px-4 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <span>Next: Background Removal</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={isExtractingFrames}
+              onClick={onRunV2ZeroTouchNow}
+              className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold flex items-center gap-1.5 whitespace-nowrap shadow-sm"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Generate & Play Sprite ({estimatedFrames}f)</span>
+            </button>
           </div>
         </div>
       )}
 
-      {/* STEP 4: MULTI-COLOR BACKGROUND REMOVAL & LOCALISED POCKET PUNCHER */}
-      {currentStep === 4 && (
+      {/* STEP 3: MULTI-COLOR BACKGROUND REMOVAL & LAYERED MULTI-COLOR POCKET STUDIO */}
+      {currentStep === 3 && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Primary BG Color + Conditional Extra BG Shades / Shadows */}
+          {/* Primary BG Color + V2 Auto-Calibrated 3 K-Means BG Clusters */}
           <div className="flex flex-wrap items-center gap-1.5">
+            {activeAsset?.bgProfile && (
+              <div
+                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-950/50 border border-emerald-500/40 text-[11px] text-emerald-200"
+                title="Stage 1 Auto-Calibrated 5% Border K-Means Clusters (Bright BG, Midtone BG, Shadowed Floor BG) + CIELAB Standard Deviation"
+              >
+                <Sparkles className="w-3 h-3 text-emerald-400 shrink-0" />
+                <span className="font-semibold hidden xl:inline">Auto 3-Cluster BG:</span>
+                {activeAsset.bgProfile.clusters.map((c) => (
+                  <span
+                    key={c.id}
+                    title={`${c.label}: ${c.hex} (σ=${c.sigmaLab.toFixed(1)}, ${c.weightPct}% border)`}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-950/90 border border-slate-700 font-mono text-[10px]"
+                  >
+                    <span
+                      style={{ backgroundColor: c.hex }}
+                      className="w-2.5 h-2.5 rounded-sm border border-slate-400 inline-block"
+                    />
+                    <span>±{c.sigmaLab.toFixed(1)}σ</span>
+                  </span>
+                ))}
+              </div>
+            )}
+
             <input
               type="color"
               value={settings.keyColor}
@@ -708,7 +754,6 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
               <span>Pick BG</span>
             </button>
 
-            {/* Conditional Multi-Color / Shadow Shade Picker */}
             <button
               type="button"
               onClick={() =>
@@ -722,10 +767,9 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
               title="Click a cast shadow or secondary background shade on the stage to remove multiple background colors"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>Add BG Shade / Shadow</span>
+              <span>Add BG Shade</span>
             </button>
 
-            {/* Render chips for any added secondary background / shadow colors */}
             {(settings.secondaryKeyColors || []).map((sec) => (
               <div
                 key={sec.id}
@@ -750,9 +794,9 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
           </div>
 
           {/* Primary Tolerance Slider */}
-          <div className="w-44">
+          <div className="w-36">
             <CompactSlider
-              label="Removal Strength"
+              label="BG Tolerance"
               value={settings.tolerance}
               unit="%"
               min={5}
@@ -762,19 +806,19 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
             />
           </div>
 
-          {/* Localised Click-to-Punch Pocket & Protect Area */}
-          <div className="flex items-center gap-1.5">
+          {/* PUNCH LOCAL POCKET + DEDICATED MULTI-COLOR PALETTE & LAYERED STUDIO */}
+          <div className="flex flex-wrap items-center gap-1.5 bg-[#070A10]/90 px-2.5 py-1 rounded-xl border border-slate-800">
             <button
               type="button"
               onClick={() =>
                 setClickTool(clickTool === 'punch_hole' ? 'pan' : 'punch_hole')
               }
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border flex items-center gap-1.5 transition-colors ${
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border flex items-center gap-1.5 transition-colors ${
                 clickTool === 'punch_hole'
-                  ? 'bg-rose-600 text-white border-rose-400'
-                  : 'bg-[#070A10] text-slate-200 border-slate-800 hover:border-rose-500/60'
+                  ? 'bg-rose-600 text-white border-rose-400 shadow-sm'
+                  : 'bg-slate-900 text-slate-100 border-slate-700 hover:border-rose-500/60'
               }`}
-              title="Localised Magic Wand: Click any trapped gap or local shadow pocket to erase that contiguous shade region"
+              title="Click inside any enclosed gap or shaded pocket on the canvas to add a Punch Pocket Layer"
             >
               <Eraser className="w-3.5 h-3.5 text-rose-400" />
               <span>Punch Local Pocket</span>
@@ -783,41 +827,613 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
             <button
               type="button"
               onClick={() =>
-                setClickTool(clickTool === 'protect_spot' ? 'pan' : 'protect_spot')
+                updateSettings({
+                  punchUsePrimaryBg: !(settings.punchUsePrimaryBg !== false),
+                })
               }
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border flex items-center gap-1.5 transition-colors ${
-                clickTool === 'protect_spot'
-                  ? 'bg-emerald-600 text-white border-emerald-400'
-                  : 'bg-[#070A10] text-slate-200 border-slate-800 hover:border-emerald-500/60'
+              className={`px-2 py-1 rounded-md border text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
+                settings.punchUsePrimaryBg !== false
+                  ? 'bg-slate-800/90 border-rose-500/50 text-slate-100'
+                  : 'bg-slate-950 border-slate-800 text-slate-500 line-through'
               }`}
-              title="Click any inner character region to keep its local shade 100% solid"
+              title="By default, Punch Local Pocket matches the Primary Background Color. Click to toggle."
             >
-              <Shield className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Protect Area</span>
+              <span
+                style={{ backgroundColor: settings.keyColor }}
+                className="w-3 h-3 rounded-sm border border-slate-400 inline-block"
+              />
+              <span>Same as BG</span>
             </button>
 
-            {/* Generalised Enclosed Gaps & Multi-Shade Options Popover */}
+            {(settings.pocketTargetColors || []).map((pcol, idx) => (
+              <div
+                key={pcol.id}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-900 border border-rose-500/40 text-[11px] font-mono text-slate-200"
+                title={`Pocket Target Color #${idx + 1} (${pcol.hex})`}
+              >
+                <input
+                  type="color"
+                  value={pcol.hex}
+                  onChange={(e) =>
+                    updatePocketTargetColor(pcol.id, {
+                      hex: e.target.value.toUpperCase(),
+                    })
+                  }
+                  className="w-4 h-4 rounded bg-transparent border-0 cursor-pointer"
+                />
+                <span className="hidden xl:inline">{pcol.hex}</span>
+                <button
+                  type="button"
+                  onClick={() => removePocketTargetColor(pcol.id)}
+                  className="text-slate-400 hover:text-rose-400"
+                  title="Remove pocket color"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+
+            <button
+              type="button"
+              onClick={() =>
+                setClickTool(
+                  clickTool === 'pick_pocket_color' ? 'pan' : 'pick_pocket_color'
+                )
+              }
+              className={`px-2 py-1 rounded-md text-[11px] font-medium border flex items-center gap-1 transition-colors ${
+                clickTool === 'pick_pocket_color'
+                  ? 'bg-rose-500 text-slate-950 border-rose-300 font-semibold'
+                  : 'bg-slate-900 text-rose-300 border-slate-700 hover:border-rose-500/50'
+              }`}
+              title="Sample a 2nd or 3rd shade inside a pocket on the canvas to add to Punch Local Pocket's multi-color list"
+            >
+              <Pipette className="w-3 h-3" />
+              <span>+ Pocket Color</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setClickTool(clickTool === 'protect_spot' ? 'pan' : 'protect_spot')
+              }
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border flex items-center gap-1 transition-colors ${
+                clickTool === 'protect_spot'
+                  ? 'bg-emerald-600 text-white border-emerald-400'
+                  : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-emerald-500/60'
+              }`}
+              title="Click any inner character region to add a Protect Layer that keeps its shade 100% solid"
+            >
+              <Shield className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Protect</span>
+            </button>
+
+            {/* POCKET LAYERS POPOVER STUDIO */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenPopover(
+                    openPopover === 'pocket_studio' ? null : 'pocket_studio'
+                  )
+                }
+                className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                  openPopover === 'pocket_studio' || pocketLayers.length > 0
+                    ? 'bg-rose-950/60 border-rose-500/60 text-rose-200'
+                    : 'bg-slate-900 border-slate-700 text-slate-200 hover:border-slate-600'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5 text-rose-400" />
+                <span>Pocket Layers ({pocketLayers.length})</span>
+                <ChevronDown className="w-3 h-3" />
+              </button>
+
+              {openPopover === 'pocket_studio' && (
+                <div className="absolute bottom-full right-0 mb-2 w-[380px] max-h-[72vh] overflow-y-auto p-4 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-40 space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                    <div>
+                      <div className="text-xs font-bold text-white">
+                        Punch Local Pocket — Colors & Layered Editor
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Defaults to BG color; add 2–3+ pocket colors & manage each click as an editable layer
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setOpenPopover(null)}
+                      className="text-slate-400 hover:text-white p-1"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 bg-[#070A10] p-3 rounded-lg border border-slate-800">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-rose-300">
+                        1. Pocket Target Colors
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setClickTool('pick_pocket_color');
+                            setOpenPopover(null);
+                          }}
+                          className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-[11px] font-semibold text-rose-200 flex items-center gap-1"
+                        >
+                          <Pipette className="w-3 h-3" />
+                          <span>Pick on Canvas</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => addPocketTargetColorSwatch()}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-medium text-slate-200 flex items-center gap-1"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>Add Swatch</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer pt-1">
+                      <span className="flex items-center gap-2">
+                        <span
+                          style={{ backgroundColor: settings.keyColor }}
+                          className="w-3.5 h-3.5 rounded border border-slate-500 inline-block"
+                        />
+                        <span>Match Primary BG Color ({settings.keyColor})</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={settings.punchUsePrimaryBg !== false}
+                        onChange={(e) =>
+                          updateSettings({ punchUsePrimaryBg: e.target.checked })
+                        }
+                        className="accent-rose-500 w-4 h-4 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
+                      <span>Auto-Include Clicked Pixel Shade on Each Layer</span>
+                      <input
+                        type="checkbox"
+                        checked={settings.punchUseSampledColor !== false}
+                        onChange={(e) =>
+                          updateSettings({ punchUseSampledColor: e.target.checked })
+                        }
+                        className="accent-rose-500 w-4 h-4 rounded"
+                      />
+                    </label>
+
+                    {(settings.pocketTargetColors || []).length > 0 ? (
+                      <div className="space-y-2 pt-1.5 border-t border-slate-800/80">
+                        {(settings.pocketTargetColors || []).map((pcol, idx) => (
+                          <div
+                            key={pcol.id}
+                            className="flex items-center gap-2 bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-800"
+                          >
+                            <input
+                              type="color"
+                              value={pcol.hex}
+                              onChange={(e) =>
+                                updatePocketTargetColor(pcol.id, {
+                                  hex: e.target.value.toUpperCase(),
+                                })
+                              }
+                              className="w-6 h-6 rounded bg-transparent border border-slate-700 cursor-pointer shrink-0"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="font-semibold text-slate-200">
+                                  Pocket Color #{idx + 1} ({pcol.hex})
+                                </span>
+                                <span className="font-mono text-rose-300">
+                                  Tol {pcol.tolerance}%
+                                </span>
+                              </div>
+                              <input
+                                type="range"
+                                min={5}
+                                max={75}
+                                value={pcol.tolerance}
+                                onChange={(e) =>
+                                  updatePocketTargetColor(pcol.id, {
+                                    tolerance: Number(e.target.value),
+                                  })
+                                }
+                                className="w-full h-1 bg-slate-800 rounded-lg accent-rose-500 cursor-pointer"
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removePocketTargetColor(pcol.id)}
+                              className="text-slate-400 hover:text-rose-400 p-1"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-slate-400 italic pt-1">
+                        No extra pocket colors added yet.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2.5 bg-[#070A10] p-3 rounded-lg border border-slate-800">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-sky-300">
+                      2. Pocket Flood-Fill Options
+                    </div>
+
+                    <CompactSlider
+                      label="Default Pocket Color Tolerance"
+                      value={settings.localPunchTolerance ?? 24}
+                      unit="%"
+                      min={5}
+                      max={75}
+                      step={1}
+                      onChange={(val) => updateSettings({ localPunchTolerance: val })}
+                    />
+
+                    <CompactSlider
+                      label="Max Pocket Spread Radius"
+                      value={settings.localPunchRadius ?? 30}
+                      unit="%"
+                      min={5}
+                      max={60}
+                      step={1}
+                      onChange={(val) => updateSettings({ localPunchRadius: val })}
+                    />
+
+                    <CompactSlider
+                      label="Pocket Inner Rim Choke (Anti-Halo)"
+                      value={settings.localPunchEdgeChoke ?? 35}
+                      unit="%"
+                      min={0}
+                      max={100}
+                      step={5}
+                      onChange={(val) => updateSettings({ localPunchEdgeChoke: val })}
+                    />
+
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <span className="text-xs text-slate-300">Flood Connectivity</span>
+                      <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSettings({ localPunchConnectivity: '4_way' })
+                          }
+                          className={`px-2 py-1 rounded text-[11px] font-medium ${
+                            (settings.localPunchConnectivity ?? '4_way') === '4_way'
+                              ? 'bg-[#3B82F6] text-white font-semibold'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          4-Way Safe Outlines
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSettings({ localPunchConnectivity: '8_way' })
+                          }
+                          className={`px-2 py-1 rounded text-[11px] font-medium ${
+                            settings.localPunchConnectivity === '8_way'
+                              ? 'bg-[#3B82F6] text-white font-semibold'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          8-Way Diagonal
+                        </button>
+                      </div>
+                    </div>
+
+                    <label className="flex items-center justify-between text-xs text-slate-300 cursor-pointer pt-1">
+                      <span>Show Layer Pins on Canvas</span>
+                      <input
+                        type="checkbox"
+                        checked={settings.showPocketMarkers !== false}
+                        onChange={(e) =>
+                          updateSettings({ showPocketMarkers: e.target.checked })
+                        }
+                        className="accent-[#3B82F6] w-4 h-4 rounded"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="space-y-2 bg-[#070A10] p-3 rounded-lg border border-slate-800">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-300">
+                        3. Layered Pocket Edits ({pocketLayers.length})
+                      </span>
+                      {pocketLayers.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSettings({
+                              holeSeeds: (settings.holeSeeds || []).filter(
+                                (s) => s.mode === 'erase_particle'
+                              ),
+                            })
+                          }
+                          className="text-[11px] text-rose-400 hover:text-rose-300 flex items-center gap-1"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Clear All Layers</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {pocketLayers.length === 0 ? (
+                      <div className="text-[11px] text-slate-400 py-2 text-center border border-dashed border-slate-800 rounded-lg">
+                        Click inside any trapped gap on the canvas with{' '}
+                        <strong className="text-rose-300">Punch Local Pocket</strong> to create Layer #1.
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                        {pocketLayers.map((layer, idx) => {
+                          const isEnabled = layer.enabled !== false;
+                          const layerColor = layer.sampledHex || settings.keyColor;
+                          const layerTol =
+                            layer.localTolerance ?? settings.localPunchTolerance ?? 24;
+                          const isSingleFrame = layer.frameScope === 'single_frame';
+
+                          return (
+                            <div
+                              key={layer.id}
+                              className={`p-2.5 rounded-lg border space-y-2 transition-colors ${
+                                isEnabled
+                                  ? 'bg-slate-900/90 border-slate-700'
+                                  : 'bg-slate-950/60 border-slate-800/60 opacity-60'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updatePocketLayer(layer.id, {
+                                        enabled: !isEnabled,
+                                      })
+                                    }
+                                    className="text-slate-300 hover:text-white p-0.5"
+                                  >
+                                    {isEnabled ? (
+                                      <Eye className="w-3.5 h-3.5 text-sky-400" />
+                                    ) : (
+                                      <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                                    )}
+                                  </button>
+
+                                  <span className="text-xs font-bold text-white">
+                                    Layer #{idx + 1}
+                                  </span>
+
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updatePocketLayer(layer.id, {
+                                        mode:
+                                          layer.mode === 'punch_hole'
+                                            ? 'protect_spot'
+                                            : 'punch_hole',
+                                      })
+                                    }
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                      layer.mode === 'punch_hole'
+                                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                    }`}
+                                  >
+                                    {layer.mode === 'punch_hole' ? 'Punch' : 'Protect'}
+                                  </button>
+                                </div>
+
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updatePocketLayer(layer.id, {
+                                        frameScope: isSingleFrame
+                                          ? 'all_frames'
+                                          : 'single_frame',
+                                        targetFrameIndex: activeFrameIndex,
+                                      })
+                                    }
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+                                      isSingleFrame
+                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                        : 'bg-slate-800 text-slate-300 border-slate-700'
+                                    }`}
+                                  >
+                                    {isSingleFrame
+                                      ? `Frame #${(layer.targetFrameIndex ?? activeFrameIndex) + 1} Only`
+                                      : 'All Frames'}
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => removePocketLayer(layer.id)}
+                                    className="text-slate-400 hover:text-rose-400 p-0.5"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                <span className="text-slate-400">Layer Colors:</span>
+                                <input
+                                  type="color"
+                                  value={layerColor}
+                                  onChange={(e) =>
+                                    updatePocketLayer(layer.id, {
+                                      sampledHex: e.target.value.toUpperCase(),
+                                    })
+                                  }
+                                  className="w-5 h-5 rounded bg-transparent border border-slate-600 cursor-pointer"
+                                />
+
+                                {(layer.extraColors || []).map((hex, cIdx) => (
+                                  <div
+                                    key={`${layer.id}-ext-${cIdx}`}
+                                    className="flex items-center gap-0.5 bg-slate-950 px-1 py-0.5 rounded border border-slate-700"
+                                  >
+                                    <input
+                                      type="color"
+                                      value={hex}
+                                      onChange={(e) => {
+                                        const nextExtra = [...(layer.extraColors || [])];
+                                        nextExtra[cIdx] = e.target.value.toUpperCase();
+                                        updatePocketLayer(layer.id, {
+                                          extraColors: nextExtra,
+                                        });
+                                      }}
+                                      className="w-4 h-4 rounded bg-transparent border-0 cursor-pointer"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const nextExtra = (
+                                          layer.extraColors || []
+                                        ).filter((_, i) => i !== cIdx);
+                                        updatePocketLayer(layer.id, {
+                                          extraColors: nextExtra,
+                                        });
+                                      }}
+                                      className="text-slate-400 hover:text-rose-400"
+                                    >
+                                      <X className="w-2.5 h-2.5" />
+                                    </button>
+                                  </div>
+                                ))}
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const nextExtra = [
+                                      ...(layer.extraColors || []),
+                                      '#C8CDD6',
+                                    ];
+                                    updatePocketLayer(layer.id, {
+                                      extraColors: nextExtra,
+                                    });
+                                  }}
+                                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 flex items-center gap-0.5"
+                                >
+                                  <Plus className="w-2.5 h-2.5" />
+                                  <span>Color</span>
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-2 text-[11px]">
+                                <span className="text-slate-400 w-16 shrink-0">
+                                  Tol: {layerTol}%
+                                </span>
+                                <input
+                                  type="range"
+                                  min={5}
+                                  max={75}
+                                  value={layerTol}
+                                  onChange={(e) =>
+                                    updatePocketLayer(layer.id, {
+                                      localTolerance: Number(e.target.value),
+                                    })
+                                  }
+                                  className="flex-1 h-1 bg-slate-800 rounded-lg accent-rose-500 cursor-pointer"
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* General Background Options Popover */}
             <div className="relative">
               <button
                 type="button"
                 onClick={() =>
                   setOpenPopover(openPopover === 'pocket_more' ? null : 'pocket_more')
                 }
-                className="px-2.5 py-1.5 rounded-lg bg-[#070A10] border border-slate-800 hover:border-slate-700 text-xs text-slate-300 flex items-center gap-1"
+                className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 hover:border-slate-600 text-xs text-slate-300 flex items-center gap-1"
               >
                 <Sliders className="w-3.5 h-3.5" />
-                <span>Options</span>
+                <span>BG Options</span>
                 <ChevronDown className="w-3 h-3" />
               </button>
 
               {openPopover === 'pocket_more' && (
-                <div className="absolute bottom-full right-0 mb-2 w-76 p-4 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-30 space-y-3">
+                <div className="absolute bottom-full right-0 mb-2 w-80 p-4 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-30 space-y-3">
                   <div className="text-xs font-bold text-white border-b border-slate-800 pb-1.5">
-                    Enclosed Gaps & Local Wand Options
+                    V2 Autonomous Sobel & Trapped Space Engine
                   </div>
 
-                  <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
-                    <span>Keep Inner Character Colors Solid</span>
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-slate-300">Keying Engine</span>
+                    <select
+                      value={settings.keyingMode}
+                      onChange={(e) =>
+                        updateSettings({
+                          keyingMode: e.target.value as ProcessingSettings['keyingMode'],
+                        })
+                      }
+                      className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-white"
+                    >
+                      <option value="v2_auto_kmeans">V2 Auto 3-Cluster K-Means</option>
+                      <option value="chroma_perceptual">Manual Chroma + Shades</option>
+                      <option value="luma_key">Luma Key</option>
+                    </select>
+                  </div>
+
+                  <CompactSlider
+                    label="Sobel Limb Barrier Strength"
+                    value={settings.v2SobelBoundaryStrength ?? 55}
+                    unit="%"
+                    min={15}
+                    max={95}
+                    step={1}
+                    onChange={(val) => updateSettings({ v2SobelBoundaryStrength: val })}
+                  />
+
+                  <CompactSlider
+                    label="Trapped Pocket K-Means Range"
+                    value={settings.v2PocketSigmaMultiplier ?? 2.0}
+                    unit="σ"
+                    min={1.0}
+                    max={3.5}
+                    step={0.1}
+                    onChange={(val) => updateSettings({ v2PocketSigmaMultiplier: val })}
+                  />
+
+                  <CompactSlider
+                    label="Max Pocket Texture Variance"
+                    value={settings.v2MaxPocketTextureVariance ?? 16}
+                    unit=""
+                    min={4}
+                    max={40}
+                    step={1}
+                    onChange={(val) =>
+                      updateSettings({ v2MaxPocketTextureVariance: val })
+                    }
+                  />
+
+                  <CompactSlider
+                    label="Boundary Linear Unmix Ring"
+                    value={settings.v2BoundaryUnmixRadius ?? 3}
+                    unit=" px"
+                    min={1}
+                    max={5}
+                    step={1}
+                    onChange={(val) => updateSettings({ v2BoundaryUnmixRadius: val })}
+                  />
+
+                  <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer pt-1 border-t border-slate-800">
+                    <span>Strict Interior Protection (Eyes/Armor)</span>
                     <input
                       type="checkbox"
                       checked={settings.protectInteriorColors}
@@ -829,7 +1445,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
                   </label>
 
                   <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
-                    <span>Auto-Clear Enclosed BG Gaps</span>
+                    <span>Auto-Punch Trapped Negative Spaces</span>
                     <input
                       type="checkbox"
                       checked={settings.autoPunchTrappedHoles}
@@ -840,61 +1456,17 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
                     />
                   </label>
 
-                  <CompactSlider
-                    label="Local Pocket Shade Tolerance"
-                    value={settings.localPunchTolerance ?? 22}
-                    unit="%"
-                    min={6}
-                    max={55}
-                    step={1}
-                    onChange={(val) => updateSettings({ localPunchTolerance: val })}
-                  />
-
-                  <CompactSlider
-                    label="Min Auto-Cleared Gap Area"
-                    value={settings.maxProtectedDetailArea}
-                    unit=" px²"
-                    min={15}
-                    max={260}
-                    step={5}
-                    onChange={(val) => updateSettings({ maxProtectedDetailArea: val })}
-                  />
-
-                  {(settings.secondaryKeyColors || []).length > 0 && (
-                    <div className="pt-2 border-t border-slate-800 space-y-2">
-                      <div className="text-[11px] font-semibold text-slate-400">
-                        Extra Background / Shadow Shades
-                      </div>
-                      {settings.secondaryKeyColors.map((sec, idx) => (
-                        <CompactSlider
-                          key={sec.id}
-                          label={`Shade #${idx + 1} (${sec.hex}) Tolerance`}
-                          value={sec.tolerance}
-                          unit="%"
-                          min={5}
-                          max={55}
-                          step={1}
-                          onChange={(val) => {
-                            const next = settings.secondaryKeyColors.map((c) =>
-                              c.id === sec.id ? { ...c, tolerance: val } : c
-                            );
-                            updateSettings({ secondaryKeyColors: next });
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
-
-                  {settings.holeSeeds.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => updateSettings({ holeSeeds: [] })}
-                      className="w-full py-1.5 rounded bg-rose-950/60 border border-rose-500/40 text-xs text-rose-300 flex items-center justify-center gap-1"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      <span>Clear {settings.holeSeeds.length} Local Edits</span>
-                    </button>
-                  )}
+                  <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
+                    <span>Remove Ground Floor Shadow Oval</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.removeGroundShadow}
+                      onChange={(e) =>
+                        updateSettings({ removeGroundShadow: e.target.checked })
+                      }
+                      className="accent-emerald-500 w-4 h-4 rounded"
+                    />
+                  </label>
                 </div>
               )}
             </div>
@@ -902,7 +1474,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
 
           <button
             type="button"
-            onClick={() => setCurrentStep(5)}
+            onClick={() => setCurrentStep(4)}
             className="px-4 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap ml-auto"
           >
             <span>Next: Auto-Crop & Particles</span>
@@ -911,8 +1483,8 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
         </div>
       )}
 
-      {/* STEP 5: AUTO-CROP, LOOSE PARTICLE CLEANER & CENTER LOCK */}
-      {currentStep === 5 && (
+      {/* STEP 4: AUTO-CROP, LOOSE PARTICLE CLEANER & CENTER LOCK */}
+      {currentStep === 4 && (
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-2.5">
             <label className="flex items-center gap-2 cursor-pointer bg-[#070A10] px-3 py-1.5 rounded-lg border border-emerald-500/40">
@@ -943,22 +1515,46 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Crosshair className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-            <span className="text-xs text-slate-300 font-medium">Center Lock:</span>
-            <select
-              value={settings.centerStabilization}
-              onChange={(e) =>
-                updateSettings({
-                  centerStabilization: e.target.value as CenterStabilizationMode,
-                })
-              }
-              className="bg-[#070A10] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white font-medium"
-            >
-              <option value="core_grounded">Lock to Core Body & Feet (Anti-Shift)</option>
-              <option value="global_locked">Global Locked Box (0px Shift)</option>
-              <option value="per_frame_bounds">Per-Frame Tight Crop</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center gap-1.5">
+              <Crosshair className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span className="text-xs text-slate-300 font-medium">Stabilizer:</span>
+              <select
+                value={settings.centerStabilization}
+                onChange={(e) =>
+                  updateSettings({
+                    centerStabilization: e.target.value as CenterStabilizationMode,
+                  })
+                }
+                className="bg-[#070A10] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white font-medium"
+              >
+                <option value="core_grounded">
+                  Center-of-Mass (centerX) + Foot Baseline Lock (maxY)
+                </option>
+                <option value="global_locked">Global Locked Box (0px Shift)</option>
+                <option value="per_frame_bounds">Per-Frame Tight Crop</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-slate-300 font-medium">Target Cell:</span>
+              <select
+                value={settings.targetSpriteResolution ?? 256}
+                onChange={(e) =>
+                  updateSettings({
+                    targetSpriteResolution: Number(
+                      e.target.value
+                    ) as TargetSpriteResolution,
+                  })
+                }
+                className="bg-[#070A10] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-emerald-300 font-semibold"
+              >
+                <option value={128}>128×128 (Supersampled)</option>
+                <option value={256}>256×256 (Supersampled)</option>
+                <option value={512}>512×512 (Supersampled)</option>
+                <option value={0}>Native Crop Size</option>
+              </select>
+            </div>
           </div>
 
           <div className="relative">
@@ -1041,7 +1637,7 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
 
           <button
             type="button"
-            onClick={() => setCurrentStep(6)}
+            onClick={() => setCurrentStep(5)}
             className="px-4 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap ml-auto"
           >
             <span>Next: Halo Remover</span>
@@ -1050,8 +1646,8 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
         </div>
       )}
 
-      {/* STEP 6: HALO REMOVER */}
-      {currentStep === 6 && (
+      {/* STEP 5: HALO REMOVER */}
+      {currentStep === 5 && (
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex-1 min-w-[280px] grid grid-cols-3 gap-4">
             <CompactSlider
@@ -1176,19 +1772,52 @@ export const StageControlDeck: React.FC<StageControlDeckProps> = ({
 
           <button
             type="button"
-            onClick={() => setCurrentStep(7)}
+            onClick={() => setCurrentStep(6)}
             className="px-4 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap"
           >
-            <span>Next: Export</span>
+            <span>Next: Preview & Export</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
 
-      {/* STEP 7: EXPORT SPRITE SHEET & BATCH HANDOFF */}
-      {currentStep === 7 && (
+      {/* STEP 6: LIVE ANIMATED SPRITE PREVIEW & EXPORT */}
+      {currentStep === 6 && (
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {activeAsset?.bestLoopCandidate && (
+              <button
+                type="button"
+                onClick={onApplyBestLoop}
+                className="px-2.5 py-1.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/40 text-[11px] font-mono text-emerald-300 flex items-center gap-1.5 transition-colors"
+                title="Click to snap active frame range to the detected Silhouette-IoU seamless loop"
+              >
+                <Repeat className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>
+                  Loop #{(activeAsset.loopStartFrame ?? 0) + 1}→#
+                  {(activeAsset.loopEndFrame ?? frames.length - 1) + 1} · Foot Locked
+                </span>
+              </button>
+            )}
+
+            <select
+              value={settings.targetSpriteResolution ?? 256}
+              onChange={(e) =>
+                updateSettings({
+                  targetSpriteResolution: Number(
+                    e.target.value
+                  ) as TargetSpriteResolution,
+                })
+              }
+              className="bg-[#070A10] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-emerald-300 font-semibold"
+              title="Area-Averaging Supersampled Sprite Cell Resolution"
+            >
+              <option value={128}>128×128 Supersampled</option>
+              <option value={256}>256×256 Supersampled</option>
+              <option value={512}>512×512 Supersampled</option>
+              <option value={0}>Native Cell Size</option>
+            </select>
+
             <select
               value={settings.sheetLayout}
               onChange={(e) =>

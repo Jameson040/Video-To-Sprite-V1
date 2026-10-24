@@ -1,13 +1,19 @@
 import {
   ArsenalVideoPreset,
-  BatchAssetItem,
-  ExtractedFrame,
   ProcessingPreset,
   ProcessingSettings,
 } from '../types/sprite';
 
 export const DEFAULT_SETTINGS: ProcessingSettings = {
-  keyingMode: 'chroma_perceptual',
+  autonomousV2Mode: true,
+  autoTrimToLoop: false,
+  v2SobelBoundaryStrength: 55,
+  v2PocketSigmaMultiplier: 2.0,
+  v2MaxPocketTextureVariance: 16,
+  v2BoundaryUnmixRadius: 3,
+  targetSpriteResolution: 256,
+
+  keyingMode: 'v2_auto_kmeans',
   keyColor: '#FBFBFB',
   secondaryKeyColors: [],
   tolerance: 20,
@@ -15,14 +21,21 @@ export const DEFAULT_SETTINGS: ProcessingSettings = {
   chromaWeight: 35,
   protectInteriorColors: true,
   autoPunchTrappedHoles: true,
-  maxProtectedDetailArea: 55,
+  maxProtectedDetailArea: 45,
   holeColorStrictness: 78,
-  localPunchTolerance: 22,
+  punchUsePrimaryBg: true,
+  punchUseSampledColor: true,
+  pocketTargetColors: [],
+  localPunchTolerance: 24,
+  localPunchRadius: 30,
+  localPunchEdgeChoke: 35,
+  localPunchConnectivity: '4_way',
+  showPocketMarkers: true,
   holeSeeds: [],
   removeCornerWatermark: true,
-  removeGroundShadow: false,
+  removeGroundShadow: true,
 
-  // Stage 5: Loose Particle Cleaner & Anti-Shift Centering defaults
+  // Stage 4: Loose Particle Cleaner & Anti-Shift Centering defaults
   cleanLooseParticles: true,
   particleFilterMode: 'smart_proximity',
   minParticleArea: 48,
@@ -35,7 +48,7 @@ export const DEFAULT_SETTINGS: ProcessingSettings = {
   anchorAlignment: 'bottom_center',
   targetScale: 1.0,
 
-  // Stage 6: Halo Remover & High-Resolution Edge Preservation defaults
+  // Stage 5: Halo Remover & High-Resolution Edge Preservation defaults
   colorUnmixStrength: 92,
   deSpillStrength: 84,
   innerColorBleedRadius: 3,
@@ -48,15 +61,11 @@ export const DEFAULT_SETTINGS: ProcessingSettings = {
   outlineWidth: 0,
   outlineColor: '#14141B',
 
-  // Stage 2 & 3: Video Time-Window Extraction defaults
-  extractionMode: 'frames',
-  videoFps: 24,
+  // Stage 2: Video Time-Window Extraction defaults
+  videoFps: 12,
   maxExtractFrames: 96,
-  islandMinArea: 140,
-  gridCols: 4,
-  gridRows: 2,
 
-  // Stage 7: Sprite Sheet & Export defaults
+  // Stage 6: Preview & Export defaults
   sheetLayout: 'grid',
   sheetColumns: 5,
   sheetSpacing: 4,
@@ -65,6 +74,39 @@ export const DEFAULT_SETTINGS: ProcessingSettings = {
 };
 
 export const USER_ARSENAL_VIDEOS: ArsenalVideoPreset[] = [
+  {
+    id: 'arsenal-minotaur-720p-punch',
+    title: 'Minotaur Horizontal Punch (720p HD)',
+    subtitle: '720p White BG + Trapped Arm/Horn Gaps + Floor Shadow + Dust Cloud',
+    badge: '720p HD Attack',
+    url: '/assets/aistudio/Minotaur_performing_horizontal_s__720p_20261024133740_2fe31e35.mp4',
+    defaultStartSec: 0.5,
+    defaultEndSec: 3.1,
+    defaultFps: 10,
+    subClips: [
+      { label: 'Full Punch Combo (0.5s – 3.1s @ 10 FPS · 26 frames)', startSec: 0.5, endSec: 3.1, fps: 10 },
+      { label: 'Core Strike Only (0.8s – 2.5s @ 12 FPS · 20 frames)', startSec: 0.8, endSec: 2.5, fps: 12 },
+      { label: 'Compact 12-Frame Attack (0.7s – 2.7s @ 6 FPS · 12 frames)', startSec: 0.7, endSec: 2.7, fps: 6 },
+      { label: 'Full 4.0s Video (0.0s – 4.0s @ 12 FPS · 48 frames)', startSec: 0.0, endSec: 4.0, fps: 12 },
+    ],
+    recommendedSettings: {
+      autonomousV2Mode: true,
+      autoTrimToLoop: false,
+      keyingMode: 'v2_auto_kmeans',
+      keyColor: '#FFFFFF',
+      removeGroundShadow: true,
+      autoPunchTrappedHoles: true,
+      protectInteriorColors: true,
+      cleanLooseParticles: true,
+      particleFilterMode: 'smart_proximity',
+      minParticleArea: 55,
+      maxParticleDistance: 24,
+      centerStabilization: 'core_grounded',
+      targetSpriteResolution: 256,
+      sheetColumns: 5,
+      videoFps: 10,
+    },
+  },
   {
     id: 'arsenal-minotaur-boss',
     title: 'Chibi Minotaur (White BG + Shadow)',
@@ -82,7 +124,7 @@ export const USER_ARSENAL_VIDEOS: ArsenalVideoPreset[] = [
       { label: 'Full 4s Video (All 96 Frames @ 24 FPS)', startSec: 0.0, endSec: 4.0, fps: 24 },
     ],
     recommendedSettings: {
-      keyingMode: 'chroma_perceptual',
+      keyingMode: 'v2_auto_kmeans',
       keyColor: '#FBFBFB',
       secondaryKeyColors: [],
       tolerance: 19,
@@ -95,7 +137,7 @@ export const USER_ARSENAL_VIDEOS: ArsenalVideoPreset[] = [
       localPunchTolerance: 22,
       holeSeeds: [],
       removeCornerWatermark: true,
-      removeGroundShadow: false,
+      removeGroundShadow: true,
       cleanLooseParticles: true,
       particleFilterMode: 'smart_proximity',
       minParticleArea: 55,
@@ -129,7 +171,7 @@ export const USER_ARSENAL_VIDEOS: ArsenalVideoPreset[] = [
       { label: 'Full Video (@ 24 FPS)', startSec: 0.0, endSec: 4.0, fps: 24 },
     ],
     recommendedSettings: {
-      keyingMode: 'chroma_perceptual',
+      keyingMode: 'v2_auto_kmeans',
       keyColor: '#1AA639',
       secondaryKeyColors: [],
       tolerance: 28,
@@ -175,7 +217,7 @@ export const USER_ARSENAL_VIDEOS: ArsenalVideoPreset[] = [
       { label: 'Full Video (@ 24 FPS)', startSec: 0.0, endSec: 4.0, fps: 24 },
     ],
     recommendedSettings: {
-      keyingMode: 'chroma_perceptual',
+      keyingMode: 'v2_auto_kmeans',
       keyColor: '#1AA639',
       secondaryKeyColors: [],
       tolerance: 25,
@@ -220,7 +262,7 @@ export const USER_ARSENAL_VIDEOS: ArsenalVideoPreset[] = [
       { label: 'Full 4s Video (@ 24 FPS)', startSec: 0.0, endSec: 4.0, fps: 24 },
     ],
     recommendedSettings: {
-      keyingMode: 'chroma_perceptual',
+      keyingMode: 'v2_auto_kmeans',
       keyColor: '#FFFFFF',
       secondaryKeyColors: [],
       tolerance: 22,
@@ -261,13 +303,14 @@ export const STUDIO_PRESETS: ProcessingPreset[] = [
     description:
       'Removes white or neutral backdrops, punches enclosed gaps, and protects bright inner highlights.',
     settings: {
-      keyingMode: 'chroma_perceptual',
+      keyingMode: 'v2_auto_kmeans',
       keyColor: '#FBFBFB',
       tolerance: 19,
       softness: 15,
       chromaWeight: 35,
       protectInteriorColors: true,
       autoPunchTrappedHoles: true,
+      removeGroundShadow: true,
       maxProtectedDetailArea: 55,
       holeColorStrictness: 78,
       cleanLooseParticles: true,
@@ -294,7 +337,7 @@ export const STUDIO_PRESETS: ProcessingPreset[] = [
     description:
       'Removes green fringe around dark outlines while protecting inner details.',
     settings: {
-      keyingMode: 'chroma_perceptual',
+      keyingMode: 'v2_auto_kmeans',
       keyColor: '#1AA639',
       tolerance: 28,
       softness: 16,
@@ -372,44 +415,3 @@ export const STUDIO_PRESETS: ProcessingPreset[] = [
     },
   },
 ];
-
-export function createFallbackDemoAsset(): BatchAssetItem {
-  const width = 280;
-  const height = 280;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = '#FBFBFB';
-  ctx.fillRect(0, 0, width, height);
-
-  const frame: ExtractedFrame = {
-    id: 'fallback-0',
-    index: 0,
-    label: 'Frame_01',
-    enabled: true,
-    sourceCanvas: canvas,
-    cropBox: { x: 0, y: 0, width, height },
-    originalWidth: width,
-    originalHeight: height,
-    processedWidth: width,
-    processedHeight: height,
-  };
-
-  return {
-    id: 'fallback-demo',
-    name: 'Loading_Video.mp4',
-    type: 'video',
-    fileSize: 0,
-    status: 'ready',
-    progress: 100,
-    videoDurationSec: 4.0,
-    extractStartSec: 0.0,
-    extractEndSec: 1.05,
-    extractedAtFps: 24,
-    frames: [frame],
-    detectedKeyColor: '#FBFBFB',
-    loopStartFrame: 0,
-    loopEndFrame: 0,
-  };
-}
